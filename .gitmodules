@@ -1,0 +1,4 @@
+[submodule "vendor/somarkdown-viewer"]
+    path = vendor/somarkdown-viewer
+    url = https://github.com/SoMarkAI/SoMarkDownViewer.git
+    branch = main

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "somark"
+version = "0.1.0"
+description = "SoMark SDK + CLI — Document parsing, PDF processing, and SoMarkDown preview"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "SoMark" }]
+keywords = ["somark", "pdf", "document", "parsing", "cli", "sdk"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "httpx[socks]>=0.27",
+    "typer>=0.12",
+    "rich>=13",
+    "toml>=0.10",
+    "sopdf>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "typer[all]>=0.12",
+]
+
+[project.scripts]
+somark = "somark.cli.main:app"
+
+[project.urls]
+Homepage = "https://somark.tech"
+Repository = "https://github.com/SoMarkAI/somark-py"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["somark*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

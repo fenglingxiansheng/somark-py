@@ -1,0 +1,14 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
+include vendor/somarkdown-viewer/index.html
+recursive-include vendor/somarkdown-viewer/lib *
+recursive-include vendor/somarkdown-viewer/style *
+recursive-exclude vendor/somarkdown-viewer/.git *
+recursive-exclude vendor/somarkdown-viewer/docs *
+prune tests
+exclude vendor/somarkdown-viewer/get_latest_smd.sh
+exclude vendor/somarkdown-viewer/.gitignore
+exclude vendor/somarkdown-viewer/README.md
+exclude vendor/somarkdown-viewer/README_CN.md
