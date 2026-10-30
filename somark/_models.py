@@ -281,11 +281,11 @@ class Task:
         self._refresh_handler = refresh_handler
         self._result: Optional[ParseResponse] = None
 
-    def refresh(self) -> None:
+    def refresh(self, timeout: Optional[float] = None) -> None:
         """Poll /parse/async_check for latest status."""
         if self._refresh_handler is None:
             raise RuntimeError("Task cannot refresh without a parser resource. Use client.parser.task(task_id).")
-        data = self._refresh_handler(self.id)
+        data = self._refresh_handler(self.id, timeout=timeout) if timeout is not None else self._refresh_handler(self.id)
         self._apply_api(data)
 
     def _apply_api(self, data: dict) -> None:
@@ -306,13 +306,23 @@ class Task:
         """Block until task completes or timeout."""
         import time
         from somark._exceptions import ParseTimeoutError, ParseFailedError
-        elapsed = 0.0
+        deadline = time.monotonic() + timeout
         while not self.completed:
-            if elapsed >= timeout:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise ParseTimeoutError(f"Task {self.id} timed out after {timeout}s")
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-            self.refresh()
+            time.sleep(min(poll_interval, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ParseTimeoutError(f"Task {self.id} timed out after {timeout}s")
+            try:
+                self.refresh(timeout=remaining)
+            except Exception as exc:
+                if time.monotonic() >= deadline:
+                    raise ParseTimeoutError(f"Task {self.id} timed out after {timeout}s") from exc
+                raise
+            if time.monotonic() >= deadline:
+                raise ParseTimeoutError(f"Task {self.id} timed out after {timeout}s")
         if self.status == "failed":
             raise ParseFailedError(f"Task {self.id} failed")
         return self._result  # type: ignore

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import threading
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -9,7 +11,7 @@ from rich.table import Table
 from somark._models import OutputPlan, plan_output
 from somark.cli._help import HELP_CONTEXT_SETTINGS, examples
 from somark.cli._output import console, err_console, make_spinner, print_error, print_success
-from somark.resources._parse_core import resolve_cli_file_inputs
+from somark.resources._parse_core import resolve_cli_file_inputs, run_limited_sync
 
 PARSE_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_interspersed_args": True}
 
@@ -128,27 +130,55 @@ def parse(
             raise typer.Exit(3)
         if is_batch:
             _validate_batch_output(out, fmt_list)
-            with make_spinner("Submitting parse tasks...") as progress:
-                progress.add_task("submit")
-                tasks = client.parser.create(
-                    file=input_files,
-                    formats=fmt_list,
-                    element_formats=element_formats,
-                    extract_config=extract_config,
+            manifest = Path(out) / "somark-tasks.jsonl"
+            manifest_lock = threading.Lock()
+
+            def process_batch_file(file: str) -> dict:
+                task_id = ""
+                try:
+                    task = client.parser.create(
+                        file=file,
+                        formats=fmt_list,
+                        element_formats=element_formats,
+                        extract_config=extract_config,
+                    )
+                    task_id = task.id
+                    err_console.print(f"Task submitted: {file} -> {task_id}")
+                    with manifest_lock:
+                        with manifest.open("a", encoding="utf-8") as handle:
+                            handle.write(json.dumps({"file": str(Path(file).resolve()), "task_id": task_id}) + "\n")
+                            handle.flush()
+                    response = task.wait(timeout=3600.0)
+                    response.source_file_name = response.source_file_name or Path(file).name
+                    plan = plan_output(file, out, fmt_list, batch=True)
+                    _save_output_plan(response, plan)
+                    return {"file": file, "task_id": task_id, "outputs": _plan_paths(plan), "error": ""}
+                except Exception as exc:
+                    return {"file": file, "task_id": task_id, "outputs": [], "error": str(exc)}
+
+            with make_spinner("Submitting and processing files...") as progress:
+                progress.add_task("parse")
+                batch = run_limited_sync(input_files, process_batch_file)
+            for warning in batch.warnings:
+                console.print(f"Warning: {warning}")
+            table = Table(title="Batch parse results")
+            table.add_column("File")
+            table.add_column("Status")
+            table.add_column("Task ID")
+            table.add_column("Output / Error")
+            for item in batch.results:
+                table.add_row(
+                    item["file"],
+                    "success" if not item["error"] else "failed",
+                    item["task_id"],
+                    ", ".join(item["outputs"]) if not item["error"] else item["error"],
                 )
-            with make_spinner("Waiting for parse tasks...") as progress:
-                progress.add_task("wait")
-                responses = [task.wait(timeout=3600.0) for task in tasks]
-            response_list = list(responses)
-            _save_batch_outputs(input_files, response_list, out, fmt_list)
-            _render_batch_results(
-                input_files,
-                response_list,
-                async_mode=False,
-                formats=fmt_list,
-                out=out,
-                verbose=verbose,
-            )
+            console.print(table)
+            console.print(f"Task manifest: {manifest}")
+            failed = sum(bool(item["error"]) for item in batch.results)
+            console.print(f"Summary: total={len(batch.results)} success={len(batch.results) - failed} failed={failed}")
+            if failed:
+                raise typer.Exit(1)
             return
 
         file = input_files[0]

@@ -24,9 +24,10 @@ class DocumentParser:
         if not self._http.api_key:
             raise AuthenticationError("api_key is required for parser operations.")
 
-    def _poll_task(self, task_id: str) -> dict:
+    def _poll_task(self, task_id: str, timeout: Optional[float] = None) -> dict:
         self._check_api_key()
-        data = self._http.post("/parse/async_check", data={"task_id": task_id})
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        data = self._http.post("/parse/async_check", data={"task_id": task_id}, **kwargs)
         emit_warnings(collect_api_warnings(data))
         return data
 

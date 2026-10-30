@@ -45,19 +45,20 @@ class HttpClient:
         path: str,
         data: Optional[Dict[str, Any]] = None,
         files: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> dict:
         url = self.base_url + path
         form_data = self._build_data(data or {})
-        # 解析上传超时结果不确定：服务端可能已创建任务，因此禁止自动重提。
-        # 同时覆盖 sync/async 两个提交端点；状态查询等其他请求仍可按 max_retries 重试。
+        # Parse submission timeouts are ambiguous: the server may have created a task.
+        # Disable retries for both submission endpoints; status queries remain retryable.
         retry_safe = not (path in ("/parse/sync", "/parse/async") and files)
         last_exc = None
         for attempt in range(self.max_retries + 1):
             try:
                 if files:
-                    response = self._client.post(url, data=form_data, files=files)
+                    response = self._client.post(url, data=form_data, files=files, **({"timeout": timeout} if timeout is not None else {}))
                 else:
-                    response = self._client.post(url, data=form_data)
+                    response = self._client.post(url, data=form_data, **({"timeout": timeout} if timeout is not None else {}))
                 if response.status_code in RETRY_HTTP_STATUSES and retry_safe and attempt < self.max_retries:
                     time.sleep(2 ** attempt)
                     continue
@@ -72,15 +73,17 @@ class HttpClient:
                 return result
             except httpx.ConnectError as e:
                 last_exc = ConnectionError(str(e))
-                # 不能只跳过退避等待，否则循环仍会再次发送请求；不安全请求必须立即退出。
+                # Skipping the delay alone would still continue the loop and resend the request.
                 if not retry_safe or attempt >= self.max_retries:
                     raise last_exc
                 time.sleep(2 ** attempt)
             except httpx.TimeoutException as e:
                 message = str(e)
                 if not retry_safe:
-                    # 客户端超时不代表服务端任务取消，提示用户先确认状态或改用异步提交。
-                    message += ". The server may have accepted this parse request. Do not resubmit; this request did not return a task ID, so contact support to check its status."
+                    if path == "/parse/async":
+                        message = "Connection timed out."
+                    else:
+                        message = "Connection timed out. Please use the async API."
                 last_exc = TimeoutError(message)
                 if not retry_safe or attempt >= self.max_retries:
                     raise last_exc
@@ -131,7 +134,7 @@ class AsyncHttpClient:
         import asyncio
         url = self.base_url + path
         form_data = self._build_data(data or {})
-        # sync/async 都会创建解析任务；超时后不重发，避免后台已接收时重复派发。
+        # Both endpoints create parse tasks; do not resend after an ambiguous timeout.
         retry_safe = not (path in ("/parse/sync", "/parse/async") and files)
         last_exc = None
         for attempt in range(self.max_retries + 1):
@@ -154,15 +157,17 @@ class AsyncHttpClient:
                 return result
             except httpx.ConnectError as e:
                 last_exc = ConnectionError(str(e))
-                # 不安全请求直接抛出，不能让 for 循环进入下一次上传。
+                # Raise immediately so the loop cannot submit the file again.
                 if not retry_safe or attempt >= self.max_retries:
                     raise last_exc
                 await asyncio.sleep(2 ** attempt)
             except httpx.TimeoutException as e:
                 message = str(e)
                 if not retry_safe:
-                    # 同步解析请求超时时提醒：后台任务可能仍在运行，不要盲目重新提交。
-                    message += ". The server may have accepted this parse request. Do not resubmit; this request did not return a task ID, so contact support to check its status."
+                    if path == "/parse/async":
+                        message = "Connection timed out."
+                    else:
+                        message = "Connection timed out. Please use the async API."
                 last_exc = TimeoutError(message)
                 if not retry_safe or attempt >= self.max_retries:
                     raise last_exc
