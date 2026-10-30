@@ -8,7 +8,7 @@ from rich.table import Table
 
 from somark._models import OutputPlan, plan_output
 from somark.cli._help import HELP_CONTEXT_SETTINGS, examples
-from somark.cli._output import console, make_spinner, print_error, print_success
+from somark.cli._output import console, err_console, make_spinner, print_error, print_success
 from somark.resources._parse_core import resolve_cli_file_inputs
 
 PARSE_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_interspersed_args": True}
@@ -128,14 +128,17 @@ def parse(
             raise typer.Exit(3)
         if is_batch:
             _validate_batch_output(out, fmt_list)
-            with make_spinner("Parsing files...") as progress:
-                progress.add_task("parse")
-                responses = client.parser.parse(
+            with make_spinner("Submitting parse tasks...") as progress:
+                progress.add_task("submit")
+                tasks = client.parser.create(
                     file=input_files,
                     formats=fmt_list,
                     element_formats=element_formats,
                     extract_config=extract_config,
                 )
+            with make_spinner("Waiting for parse tasks...") as progress:
+                progress.add_task("wait")
+                responses = [task.wait(timeout=3600.0) for task in tasks]
             response_list = list(responses)
             _save_batch_outputs(input_files, response_list, out, fmt_list)
             _render_batch_results(
@@ -151,23 +154,28 @@ def parse(
         file = input_files[0]
         plan = plan_output(file, out, fmt_list, allow_stdout=True)
         if plan.stdout:
-            response = client.parser.parse(
+            task = client.parser.create(
                 file=file,
                 formats=fmt_list,
                 element_formats=element_formats,
                 extract_config=extract_config,
             )
+            err_console.print(f"Task submitted: {task.id}; waiting for completion...")
+            response = task.wait(timeout=3600.0)
             console.print(response._content_for_format(fmt_list[0]), end="")
             return
 
-        with make_spinner(f"Parsing {file}...") as progress:
-            progress.add_task("parse")
-            response = client.parser.parse(
+        with make_spinner(f"Submitting {file}...") as progress:
+            progress.add_task("submit")
+            task = client.parser.create(
                 file=file,
                 formats=fmt_list,
                 element_formats=element_formats,
                 extract_config=extract_config,
             )
+        with make_spinner(f"Waiting for task {task.id}...") as progress:
+            progress.add_task("wait")
+            response = task.wait(timeout=3600.0)
         _save_output_plan(response, plan)
         print_success(f"Done in {response.pages} pages")
         for output in _plan_paths(plan):
