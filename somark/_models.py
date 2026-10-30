@@ -262,6 +262,19 @@ class Usage(SoMarkResponse):
         )
 
 
+def _handler_accepts_timeout(handler: Callable[..., Any]) -> bool:
+    from inspect import Parameter, signature
+
+    try:
+        params = signature(handler).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.name == "timeout" or param.kind == Parameter.VAR_KEYWORD
+        for param in params
+    )
+
+
 class Task:
     """Represents an async parsing task."""
 
@@ -285,7 +298,10 @@ class Task:
         """Poll /parse/async_check for latest status."""
         if self._refresh_handler is None:
             raise RuntimeError("Task cannot refresh without a parser resource. Use client.parser.task(task_id).")
-        data = self._refresh_handler(self.id, timeout=timeout) if timeout is not None else self._refresh_handler(self.id)
+        if timeout is not None and _handler_accepts_timeout(self._refresh_handler):
+            data = self._refresh_handler(self.id, timeout=timeout)
+        else:
+            data = self._refresh_handler(self.id)
         self._apply_api(data)
 
     def _apply_api(self, data: dict) -> None:

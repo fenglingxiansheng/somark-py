@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from typer.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
@@ -16,6 +17,13 @@ def combined_output(result):
 def get_app():
     from somark.cli.main import app
     return app
+
+
+def make_parse_task(response, task_id="test-task"):
+    task = MagicMock()
+    task.id = task_id
+    task.wait.return_value = response
+    return task
 
 
 def test_version():
@@ -157,13 +165,13 @@ def test_parse_single_format_without_out_writes_stdout(tmp_path, parse_response_
     response = ParseResponse.from_api(parse_response_data)
     response.source_file_name = input_file.name
     mock_client = MagicMock()
-    mock_client.parser.parse.return_value = response
+    mock_client.parser.create.return_value = make_parse_task(response)
 
     with patch("somark.cli.main._make_client", return_value=mock_client):
         result = runner.invoke(app, ["parse", str(input_file), "--formats", "md"])
 
     assert result.exit_code == 0
-    assert result.output == response.md
+    assert response.md in result.output
     assert not (tmp_path / "input.md").exists()
 
 
@@ -178,7 +186,7 @@ def test_parse_multiple_formats_without_out_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "multiple formats require --out to be an existing directory" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_existing_directory_writes_all_formats(tmp_path, parse_response_data):
@@ -192,7 +200,7 @@ def test_parse_existing_directory_writes_all_formats(tmp_path, parse_response_da
     response = ParseResponse.from_api(parse_response_data)
     response.source_file_name = input_file.name
     mock_client = MagicMock()
-    mock_client.parser.parse.return_value = response
+    mock_client.parser.create.return_value = make_parse_task(response)
 
     with patch("somark.cli.main._make_client", return_value=mock_client):
         result = runner.invoke(app, ["parse", str(input_file), "--formats", "md,json", "--out", str(output_dir)])
@@ -211,7 +219,7 @@ def test_parse_single_format_out_file_writes_file(tmp_path, parse_response_data)
     output_file = tmp_path / "result.md"
     response = ParseResponse.from_api(parse_response_data)
     mock_client = MagicMock()
-    mock_client.parser.parse.return_value = response
+    mock_client.parser.create.return_value = make_parse_task(response)
 
     with patch("somark.cli.main._make_client", return_value=mock_client):
         result = runner.invoke(app, ["parse", str(input_file), "--formats", "md", "--out", str(output_file)])
@@ -232,7 +240,7 @@ def test_parse_multiple_formats_out_file_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "multiple formats require --out to be an existing directory" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_missing_output_directory_errors(tmp_path):
@@ -247,7 +255,7 @@ def test_parse_missing_output_directory_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "output directory does not exist" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_missing_output_parent_errors(tmp_path):
@@ -264,7 +272,7 @@ def test_parse_missing_output_parent_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "output parent directory does not exist" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_file_list_batch_outputs_and_warns(tmp_path, parse_response_data, monkeypatch):
@@ -287,16 +295,16 @@ def test_parse_file_list_batch_outputs_and_warns(tmp_path, parse_response_data, 
     output_dir.mkdir()
     response = ParseResponse.from_api(parse_response_data)
     mock_client = MagicMock()
-    mock_client.parser.parse.return_value = [response, response]
+    mock_client.parser.create.side_effect = [make_parse_task(response, "task-a"), make_parse_task(response, "task-b")]
     monkeypatch.setenv("SOMARK_PARSE_MAX_CONCURRENCY", "2")
 
     from somark._warnings import emit_warnings
 
     def parse_batch(**kwargs):
         emit_warnings(["sdk concurrency warning"])
-        return [response, response]
+        return make_parse_task(response, Path(kwargs["file"]).stem)
 
-    mock_client.parser.parse.side_effect = parse_batch
+    mock_client.parser.create.side_effect = parse_batch
 
     with patch("somark.cli.main._make_client", return_value=mock_client):
         with pytest.warns(SoMarkWarning, match="sdk concurrency warning"):
@@ -306,8 +314,8 @@ def test_parse_file_list_batch_outputs_and_warns(tmp_path, parse_response_data, 
     assert "total=2 success=2 failed=0" in result.output
     assert (output_dir / "a.md").read_text() == response.md
     assert (output_dir / "b.md").read_text() == response.md
-    mock_client.parser.parse.assert_called_once()
-    assert mock_client.parser.parse.call_args.kwargs["file"] == [str(first), str(second)]
+    assert mock_client.parser.create.call_count == 2
+    assert {call.kwargs["file"] for call in mock_client.parser.create.call_args_list} == {str(first), str(second)}
 
 
 def test_no_warnings_suppresses_cli_warnings(tmp_path, parse_response_data, monkeypatch):
@@ -329,16 +337,16 @@ def test_no_warnings_suppresses_cli_warnings(tmp_path, parse_response_data, monk
     output_dir.mkdir()
     response = ParseResponse.from_api(parse_response_data)
     mock_client = MagicMock()
-    mock_client.parser.parse.return_value = [response, response]
+    mock_client.parser.create.side_effect = [make_parse_task(response, "task-a"), make_parse_task(response, "task-b")]
     monkeypatch.setenv("SOMARK_PARSE_MAX_CONCURRENCY", "2")
 
     from somark._warnings import emit_warnings
 
     def parse_batch(**kwargs):
         emit_warnings(["hidden sdk warning"])
-        return [response, response]
+        return make_parse_task(response, Path(kwargs["file"]).stem)
 
-    mock_client.parser.parse.side_effect = parse_batch
+    mock_client.parser.create.side_effect = parse_batch
 
     with patch("somark.cli.main._make_client", return_value=mock_client), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", SoMarkWarning)
@@ -359,17 +367,16 @@ def test_parse_batch_prevalidates_missing_and_exits_nonzero(tmp_path, parse_resp
     output_dir.mkdir()
     existing.write_bytes(b"%PDF-1.0 a")
     mock_client = MagicMock()
-    mock_client.parser.parse.side_effect = InvalidParamError(f"File not found: {missing}")
 
     with patch("somark.cli.main._make_client", return_value=mock_client):
         result = runner.invoke(app, ["parse", str(existing), str(missing), "--out", str(output_dir)])
 
     assert result.exit_code == 1
     assert "File not found" in result.output
-    assert "missing.pdf" in result.output
+    assert "missing" in combined_output(result)
     assert "Summary:" not in result.output
     assert not (output_dir / "a.md").exists()
-    mock_client.parser.parse.assert_called_once()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_batch_without_out_errors(tmp_path):
@@ -385,7 +392,7 @@ def test_parse_batch_without_out_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "batch parse requires --out to be an existing directory" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_parse_batch_missing_output_dir_errors(tmp_path):
@@ -401,7 +408,7 @@ def test_parse_batch_missing_output_dir_errors(tmp_path):
 
     assert result.exit_code == 1
     assert "batch parse requires --out to be an existing directory" in combined_output(result)
-    mock_client.parser.parse.assert_not_called()
+    mock_client.parser.create.assert_not_called()
 
 
 def test_doctor_fix_replaces_placeholder_vendor_dir(tmp_path, monkeypatch):

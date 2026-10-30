@@ -11,7 +11,7 @@ from rich.table import Table
 from somark._models import OutputPlan, plan_output
 from somark.cli._help import HELP_CONTEXT_SETTINGS, examples
 from somark.cli._output import console, err_console, make_spinner, print_error, print_success
-from somark.resources._parse_core import resolve_cli_file_inputs, run_limited_sync
+from somark.resources._parse_core import ensure_files_exist, resolve_cli_file_inputs, run_limited_sync
 
 PARSE_CONTEXT_SETTINGS = {**HELP_CONTEXT_SETTINGS, "allow_interspersed_args": True}
 
@@ -78,11 +78,11 @@ def parse(
             if wait:
                 stdout_mode = out is None and len(fmt_list) == 1
                 if stdout_mode:
-                    response = task.wait()
+                    response = task.wait(timeout=3600.0)
                 else:
                     with make_spinner(f"Waiting for task {task_id}...") as progress:
                         progress.add_task("wait")
-                        response = task.wait()
+                        response = task.wait(timeout=3600.0)
                 response.source_file_name = response.source_file_name or task.file_name
                 plan = plan_output(response.source_file_name or "output", out, fmt_list, allow_stdout=True)
                 if plan.stdout:
@@ -102,15 +102,43 @@ def parse(
                 print_error("File argument required for async mode")
                 raise typer.Exit(3)
             if is_batch:
-                with make_spinner("Submitting tasks...") as progress:
-                    progress.add_task("submit")
-                    tasks = client.parser.create(
-                        file=input_files,
-                        formats=fmt_list,
-                        element_formats=element_formats,
-                        extract_config=extract_config,
-                    )
-                _render_batch_results(input_files, list(tasks), async_mode=True, formats=fmt_list, out=out, verbose=verbose)
+                ensure_files_exist(input_files)
+                manifest = Path.cwd() / "somark-tasks.jsonl"
+                manifest_lock = threading.Lock()
+
+                def submit_batch_file(file: str) -> dict:
+                    task_id = ""
+                    try:
+                        task = client.parser.create(
+                            file=file,
+                            formats=fmt_list,
+                            element_formats=element_formats,
+                            extract_config=extract_config,
+                        )
+                        task_id = task.id
+                        err_console.print(f"Task submitted: {file} -> {task_id}")
+                        with manifest_lock:
+                            with manifest.open("a", encoding="utf-8") as handle:
+                                handle.write(json.dumps({"file": str(Path(file).resolve()), "task_id": task_id}) + "\n")
+                                handle.flush()
+                        return {"file": file, "task_id": task_id, "error": ""}
+                    except Exception as exc:
+                        return {"file": file, "task_id": task_id, "error": str(exc)}
+
+                batch = run_limited_sync(input_files, submit_batch_file)
+                table = Table(title="Async batch submissions")
+                table.add_column("File")
+                table.add_column("Status")
+                table.add_column("Task ID")
+                table.add_column("Error")
+                for item in batch.results:
+                    table.add_row(item["file"], "failed" if item["error"] else "submitted", item["task_id"], item["error"])
+                console.print(table)
+                console.print(f"Task manifest: {manifest}")
+                failed = sum(bool(item["error"]) for item in batch.results)
+                console.print(f"Summary: total={len(batch.results)} submitted={len(batch.results) - failed} failed={failed}")
+                if failed:
+                    raise typer.Exit(1)
                 return
             file = input_files[0]
             task = client.parser.create(
@@ -130,6 +158,7 @@ def parse(
             raise typer.Exit(3)
         if is_batch:
             _validate_batch_output(out, fmt_list)
+            ensure_files_exist(input_files)
             manifest = Path(out) / "somark-tasks.jsonl"
             manifest_lock = threading.Lock()
 
